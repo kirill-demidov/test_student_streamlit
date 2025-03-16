@@ -1,32 +1,54 @@
 import os
-import json
-import base64
 import gspread
 import sqlite3
 import pandas as pd
 import streamlit as st
-import sys
+import subprocess
+from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 
-# Hebrew UI Setup
-st.set_page_config(page_title="מערכת ניהול מבחנים", layout="wide")
+# ✅ Load environment variables from .env file
+load_dotenv()
 
-# Load Google Sheets credentials from environment variables
-google_creds_base64 = os.getenv("GOOGLE_CREDENTIALS_JSON")
+# ✅ Read Google Credentials Path
+google_creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
-if google_creds_base64:
-    google_creds_json = base64.b64decode(google_creds_base64).decode("utf-8")
-    google_creds = json.loads(google_creds_json)
-    client = gspread.service_account_from_dict(google_creds)
+if google_creds_path and os.path.exists(google_creds_path):
+    try:
+        # Authenticate with Google Sheets using the JSON file
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            google_creds_path,
+            scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        )
+        client = gspread.authorize(creds)
+
+    except Exception as e:
+        st.error(f"❌ Error loading credentials file: {e}")
+        st.stop()
 else:
-    st.error("GOOGLE_CREDENTIALS_JSON לא מוגדר!")
+    st.error("❌ GOOGLE_APPLICATION_CREDENTIALS environment variable is missing or file not found!")
     st.stop()
 
-# Connect to Google Sheets
-SHEET_ID = "1qKjn9TCi3myboBmBZkwM-36ENLigcN1NOt-l4d1ku2Y"
-sheet = client.open_by_key(SHEET_ID)
+# ✅ Optimize Google Sheets API Calls with Caching
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_google_sheet():
+    return client.open_by_key("1qKjn9TCi3myboBmBZkwM-36ENLigcN1NOt-l4d1ku2Y")
 
-# Setup SQLite database
+sheet = get_google_sheet()
+
+@st.cache_data(ttl=300)  # Cache sheet data for 5 minutes
+def get_sheet_data(sheet_name):
+    worksheet = sheet.worksheet(sheet_name)
+    all_rows = worksheet.col_values(1)
+
+    # ✅ Ignore the first row (header)
+    return all_rows[1:] if len(all_rows) > 1 else []
+
+students = get_sheet_data("שמות תלמידים")
+test_ids = get_sheet_data("מספרים אקראיים")
+periods = get_sheet_data("עונות")
+
+# ✅ Setup SQLite database
 DB_FILE = "assignments.db"
 
 def init_db():
@@ -45,112 +67,115 @@ def init_db():
 
 init_db()
 
+# ✅ Function to clear all שיבוצים (truncate table)
+def clear_all_assignments():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM assignments")
+    conn.commit()
+    conn.close()
+
 # ✅ Exit Button Function
 def exit_app():
     st.write("האפליקציה נסגרה. ניתן לסגור את הדפדפן.")
-    sys.exit()
+    st.stop()
 
 # ✅ Initialize session state for page switching
 if "selected_student" not in st.session_state:
     st.session_state.selected_student = None
 
 if "page" not in st.session_state:
-    st.session_state.page = "חיבורים"
+    st.session_state.page = "שיבוץ"
 
 # ✅ Sidebar Navigation
 st.sidebar.header("ניווט")
-if st.sidebar.button("📌 חיבורים"):
-    st.session_state.page = "חיבורים"
+if st.sidebar.button("📌 שיבוץ"):
+    st.session_state.page = "שיבוץ"
     st.rerun()
 
 if st.sidebar.button("📊 דוחות"):
     st.session_state.page = "דוחות"
     st.rerun()
 
+if st.sidebar.button("✏️ עריכת שיבוץ"):
+    st.session_state.page = "עריכת שיבוץ"
+    st.rerun()
+
+# ✅ Delete All שיבוצים with Confirmation
+if st.sidebar.button("🚮 מחק את כל השיבוצים"):
+    st.session_state.confirm_delete = True  # Show confirmation
+
+if "confirm_delete" in st.session_state and st.session_state.confirm_delete:
+    st.sidebar.warning("❗ האם אתה בטוח שברצונך למחוק את כל השיבוצים?")
+    if st.sidebar.button("⚠️ אישור מחיקה"):
+        clear_all_assignments()
+        del st.session_state.confirm_delete  # Remove confirmation state
+        st.rerun()
+    if st.sidebar.button("❌ ביטול"):
+        del st.session_state.confirm_delete  # Cancel confirmation
+        st.rerun()
+
 if st.sidebar.button("🚪 יציאה מהאפליקציה"):
     exit_app()
 
-# ✅ Page 1: Assign students to tests
-if st.session_state.page == "חיבורים":
-    st.title("חיבור תלמידים למבחנים")
+# ✅ Page 1: Assign students to tests ("שיבוץ")
+if st.session_state.page == "שיבוץ":
+    st.title("שיבוץ תלמידים למבחנים")
 
-    # Load data from Google Sheets
-    students = sheet.worksheet("שמות תלמידים").col_values(1)
-    test_ids = sheet.worksheet("מספרים אקראיים").col_values(1)
-    periods = sheet.worksheet("עונות").col_values(1)
-
-    # Pre-fill student name if coming from "דוחות"
-    student_selected = st.selectbox("בחר תלמיד", students, 
-                                    index=students.index(st.session_state.selected_student) 
-                                    if st.session_state.selected_student in students else 0)
-
+    student_selected = st.selectbox("בחר תלמיד", students)
     test_selected = st.selectbox("בחר מבחן", test_ids)
     period_selected = st.selectbox("בחר תקופה", periods)
 
-    if st.button("שמור חיבור"):
+    if st.button("שמור שיבוץ"):
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("INSERT INTO assignments (student, test_id, period) VALUES (?, ?, ?)", 
                   (student_selected, test_selected, period_selected))
         conn.commit()
         conn.close()
-        st.session_state.selected_student = None  # Clear selected student after assignment
-        st.success(f"התלמיד {student_selected} חובר למבחן {test_selected} בתקופה {period_selected}")
+        st.success(f"התלמיד {student_selected} שובץ למבחן {test_selected} בתקופה {period_selected}")
 
-# ✅ Page 2: Reports and Export to Excel
+# ✅ Page 2: Reports ("דוחות")
 elif st.session_state.page == "דוחות":
-    st.title("דוחות מערכת")
+    st.title("📊 דוחות מערכת")
 
     conn = sqlite3.connect(DB_FILE)
-    df_assignments = pd.read_sql_query("SELECT * FROM assignments", conn)
+    df_assignments = pd.read_sql_query("SELECT id, student, test_id, period FROM assignments", conn)
 
-    # ✅ Final report (connected students)
-    st.subheader("דוח חיבורים")
-    if not df_assignments.empty:
+    # ✅ Show message if no data exists
+    if df_assignments.empty:
+        st.warning("⚠️ אין שיבוצים להצגה.")
+    else:
+        st.subheader("📋 דוח שיבוצים")
         st.dataframe(df_assignments)
 
-        # Export final report to Excel
-        def export_final_report():
-            df_assignments.to_excel("final_report.xlsx", index=False, engine="openpyxl")
-            return "final_report.xlsx"
+    conn.close()
 
-        if st.button("הורד דוח חיבורים"):
-            excel_path = export_final_report()
-            with open(excel_path, "rb") as file:
-                st.download_button(label="הורדת קובץ אקסל", data=file, file_name="דוח_חיבורים.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+# ✅ Page 3: Edit Assignments ("עריכת שיבוץ")
+elif st.session_state.page == "עריכת שיבוץ":
+    st.title("✏️ עריכת שיבוץ תלמידים")
+
+    conn = sqlite3.connect(DB_FILE)
+    df_assignments = pd.read_sql_query("SELECT id, student, test_id, period FROM assignments", conn)
+
+    if df_assignments.empty:
+        st.warning("⚠️ אין שיבוצים לעריכה.")
     else:
-        st.info("אין חיבורים רשומים.")
-
-    # ✅ Report for students not connected to tests (Displayed as List with Connection Button)
-    st.subheader("תלמידים לא מחוברים")
-    students = sheet.worksheet("שמות תלמידים").col_values(1)
-    connected_students = df_assignments["student"].tolist() if not df_assignments.empty else []
-    unconnected_students = [s for s in students if s not in connected_students]
-
-    if unconnected_students:
-        st.write("**רשימת התלמידים שאינם מחוברים למבחנים:**")
-
-        for student in unconnected_students:
-            col1, col2 = st.columns([4, 1])
+        for index, row in df_assignments.iterrows():
+            col1, col2, col3, col4 = st.columns([3, 3, 3, 1])
             with col1:
-                st.write(student)
+                student = st.selectbox("תלמיד", students, index=students.index(row["student"]) if row["student"] in students else 0, key=f"student_{row['id']}")
             with col2:
-                if st.button(f"חבר {student}", key=f"connect_{student}"):
-                    st.session_state.selected_student = student
-                    st.session_state.page = "חיבורים"
-                    st.rerun()  # ✅ Switch to "חיבורים" and pre-fill student name
-
-        # Export unconnected students report to Excel
-        def export_unconnected_report():
-            df_unconnected = pd.DataFrame({"תלמידים לא מחוברים": unconnected_students})
-            df_unconnected.to_excel("unconnected_students.xlsx", index=False, engine="openpyxl")
-            return "unconnected_students.xlsx"
-
-        if st.button("הורד רשימת תלמידים לא מחוברים"):
-            excel_path = export_unconnected_report()
-            with open(excel_path, "rb") as file:
-                st.download_button(label="הורדת קובץ אקסל", data=file, file_name="תלמידים_לא_מחוברים.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    else:
-        st.success("כל התלמידים מחוברים למבחנים!")
+                test = st.selectbox("מבחן", test_ids, index=test_ids.index(row["test_id"]) if row["test_id"] in test_ids else 0, key=f"test_{row['id']}")
+            with col3:
+                period = st.selectbox("תקופה", periods, index=periods.index(row["period"]) if row["period"] in periods else 0, key=f"period_{row['id']}")
+            with col4:
+                if st.button("🔄 עדכן", key=f"update_{row['id']}"):
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE assignments SET student=?, test_id=?, period=? WHERE id=?", 
+                                   (student, test, period, row["id"]))
+                    conn.commit()
+                    st.success(f"שיבוץ עודכן בהצלחה עבור {student}")
+                    st.rerun()
 
     conn.close()
