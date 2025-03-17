@@ -6,11 +6,13 @@ import streamlit as st
 import logging
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
+import json
 
 # ✅ Logging Configuration
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ✅ Load environment variables
+
 load_dotenv()
 
 # ✅ Read Google Credentials Path
@@ -32,7 +34,11 @@ except Exception as e:
     st.stop()
 
 # ✅ Hardcoded Years
-YEARS = ["תשפ״ה", "תשפ״ד", "תשפ״ג", "תשפ״ב"]
+YEARS = ["תשפ״ה", "תשפ״ו"]
+
+# Load configuration
+with open('config.json', 'r', encoding='utf-8') as f:
+    config = json.load(f)
 
 # ✅ Fetch Data from Google Sheets
 @st.cache_data(ttl=300)
@@ -49,16 +55,33 @@ def get_sheet_data(sheet_name):
         if not all_rows:
             return pd.DataFrame()
         df = pd.DataFrame(all_rows[1:], columns=all_rows[0])
+        
+        # Remove or comment out the debugging output
+        # st.write(f"Data from sheet '{sheet_name}':")  # Comment this line
+        # st.dataframe(df)  # Comment this line
+        # st.write(f"Columns: {df.columns.tolist()}")  # Comment this line
+        
         return df
     except Exception as e:
         st.error(f"❌ Error loading sheet {sheet_name}: {e}")
         return pd.DataFrame()
 
-students_df = get_sheet_data("שמות תלמידים")
-test_ids = get_sheet_data("מספרים אקראיים")["מספרים אקראיים"].dropna().tolist() if not get_sheet_data("מספרים אקראיים").empty else []
-periods = get_sheet_data("עונות")["עונות"].dropna().tolist() if not get_sheet_data("עונות").empty else []
+# Fetch students data
+students_df = get_sheet_data(config["sheets"]["students"])
 
-classes = students_df["כיתה"].dropna().unique().tolist() if not students_df.empty else []
+# Check if the expected column exists
+if not students_df.empty and config["columns"]["students"]["class"] in students_df.columns:
+    classes = students_df[config["columns"]["students"]["class"]].dropna().unique().tolist()
+else:
+    st.error(f"The expected column '{config['columns']['students']['class']}' does not exist in the students sheet or the sheet is empty.")
+    classes = []
+
+# Fetch test IDs and periods
+test_ids_df = get_sheet_data(config["sheets"]["test_ids"])
+test_ids = test_ids_df[config["columns"]["test_ids"]["id"]].dropna().tolist() if not test_ids_df.empty else []
+
+periods_df = get_sheet_data(config["sheets"]["periods"])
+periods = periods_df[config["columns"]["periods"]["name"]].dropna().tolist() if not periods_df.empty else []
 
 # ✅ Setup SQLite database
 DB_FILE = "assignments.db"
@@ -67,7 +90,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # ✅ Create table with edited_by column
+    # ✅ Create table with edited_by and edited_at columns
     c.execute("""
         CREATE TABLE IF NOT EXISTS assignments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,19 +99,38 @@ def init_db():
             test_id TEXT NOT NULL,
             class TEXT NOT NULL,
             student TEXT NOT NULL,
-            edited_by TEXT NOT NULL
+            edited_by TEXT NOT NULL,
+            edited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
 
     conn.commit()
     conn.close()
 
+def add_edited_at_column():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute("ALTER TABLE assignments ADD COLUMN edited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    except sqlite3.OperationalError as e:
+        logging.error(f"Error adding column: {e}")
+    conn.commit()
+    conn.close()
+
+def check_table_structure():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(assignments);")
+    columns = c.fetchall()
+    conn.close()
+    return columns
+
 init_db()
 
 # ✅ Fetch assignments
 def get_assignments():
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM assignments", conn)
+    df = pd.read_sql_query("SELECT year, period, test_id, class, student, edited_by, edited_at FROM assignments", conn)
     conn.close()
     return df
 
@@ -140,8 +182,8 @@ if selected_page == "שיבוץ":
     selected_test = st.selectbox("בחר מבחן", test_ids)
     selected_class = st.selectbox("בחר כיתה", classes)
 
-    filtered_students = students_df[students_df["כיתה"] == selected_class]
-    student_list = filtered_students["שם תלמיד"].tolist()
+    filtered_students = students_df[students_df[config["columns"]["students"]["class"]] == selected_class]
+    student_list = filtered_students[config["columns"]["students"]["name"]].tolist()
     student_selected = st.multiselect("בחר תלמיד", student_list, default=student_list)
 
     if st.button("שמור שיבוץ"):
@@ -206,9 +248,12 @@ elif selected_page == "עריכת שיבוץ":
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute("""
-                UPDATE assignments SET year=?, period=?, test_id=?, class=?, student=? WHERE id=?
+                UPDATE assignments SET year=?, period=?, test_id=?, class=?, student=?, edited_at=CURRENT_TIMESTAMP WHERE id=?
             """, (new_year, new_period, new_test_id, new_class, new_student, selected_row['id']))
             conn.commit()
             conn.close()
             st.cache_data.clear()
             st.rerun()
+
+# Вызовите эту функцию, чтобы проверить структуру таблицы
+print(check_table_structure())

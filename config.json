@@ -1,0 +1,19 @@
+{
+    "sheets": {
+        "students": "שמות תלמידים",
+        "test_ids": "מזהה של מבחן",
+        "periods": "עונות"
+    },
+    "columns": {
+        "students": {
+            "name": "שם תלמיד",
+            "class": "כיתה"
+        },
+        "test_ids": {
+            "id": "מזהה של מבחן"
+        },
+        "periods": {
+            "name": "עונות"
+        }
+    }
+}
