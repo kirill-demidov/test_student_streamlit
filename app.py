@@ -5,8 +5,9 @@ import pandas as pd
 import streamlit as st
 import logging
 from dotenv import load_dotenv
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import json
+import hashlib
 
 # ✅ Logging Configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,9 +25,9 @@ if not google_creds_path or not os.path.exists(google_creds_path):
 
 # ✅ Authenticate with Google Sheets
 try:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
+    creds = Credentials.from_service_account_file(
         google_creds_path,
-        scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     )
     client = gspread.authorize(creds)
 except Exception as e:
@@ -55,32 +56,36 @@ def get_sheet_data(sheet_name):
         if not all_rows:
             return pd.DataFrame()
         df = pd.DataFrame(all_rows[1:], columns=all_rows[0])
-        
-        # Remove or comment out the debugging output
-        # st.write(f"Data from sheet '{sheet_name}':")  # Comment this line
-        # st.dataframe(df)  # Comment this line
-        # st.write(f"Columns: {df.columns.tolist()}")  # Comment this line
-        
         return df
     except Exception as e:
         st.error(f"❌ Error loading sheet {sheet_name}: {e}")
         return pd.DataFrame()
 
+def hash_dataframe(df):
+    # Convert DataFrame to string and then hash it
+    return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
+
 # Fetch students data
 students_df = get_sheet_data(config["sheets"]["students"])
 
 # Check if the expected column exists
-if not students_df.empty and config["columns"]["students"]["class"] in students_df.columns:
-    classes = students_df[config["columns"]["students"]["class"]].dropna().unique().tolist()
+expected_class_column = config["columns"]["students"]["class"]
+if not students_df.empty and expected_class_column in students_df.columns:
+    classes = students_df[expected_class_column].dropna().unique().tolist()
 else:
-    st.error(f"The expected column '{config['columns']['students']['class']}' does not exist in the students sheet or the sheet is empty.")
+    st.error(f"The expected column '{expected_class_column}' does not exist in the students sheet or the sheet is empty.")
     classes = []
 
-# Fetch test IDs and periods
+# Fetch test IDs
 test_ids_df = get_sheet_data(config["sheets"]["test_ids"])
 test_ids = test_ids_df[config["columns"]["test_ids"]["id"]].dropna().tolist() if not test_ids_df.empty else []
 
+# Debugging output - Comment out or remove these lines
+# st.write("Test IDs DataFrame:", test_ids_df)  # Print the DataFrame to check its contents
+# st.write("Test IDs List:", test_ids)  # Print the list of test IDs
+
 periods_df = get_sheet_data(config["sheets"]["periods"])
+periods_hash = hash_dataframe(periods_df)
 periods = periods_df[config["columns"]["periods"]["name"]].dropna().tolist() if not periods_df.empty else []
 
 # ✅ Setup SQLite database
